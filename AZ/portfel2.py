@@ -123,13 +123,14 @@ def draw_quantiles(pnl_results):
     plt.plot(xax, quantiles, marker='o', linestyle='-')
     #plt.show()
 
+S0, K, T, r, sigma, mu, n_hedgepoints = 2266.92, 1800, 1, 0.0346, 0.2656, 0.0265, 252
+
 
 def get_std(n_hedge, sigma):
     pnl_results, _, _ = delta_hedging_sample(S0, K, T, r, sigma, mu, n_hedge)
 
     return np.std(pnl_results)
 
-S0, K, T, r, sigma, mu, n_hedgepoints = 2266.92, 1800, 1, 0.0346, 0.2656, 0.0265, 252
 
 '''
 vectorized_func = np.vectorize(get_std)
