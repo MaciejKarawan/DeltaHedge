@@ -26,12 +26,12 @@ def get_gamma_binary(S, K, T, r, sigma, type):
 
 S0, K, T, r, sigma, mu, n_hedgepoints = 2266.92, 1700, 1, 0.0346, 0.2656, 0.0265, 52
 
-tau = 1/52
+tau = 1
 A = sigma * np.sqrt(tau)
 #C = r + 0.5 * sigma ** 2
 #phi = (1 + np.sqrt(5)) / 2
-K_call = 1700 * np.exp(r * tau + A**2 + 0.5 * A * np.sqrt(A**2 + 4))
-K_put = 1700 * np.exp(r * tau + A**2 - 0.5 * A * np.sqrt(A**2 + 4))
+K_call = 1480 * np.exp(r * tau + A**2 + 0.5 * A * np.sqrt(A**2 + 4))
+K_put = 1480 * np.exp(r * tau + A**2 - 0.5 * A * np.sqrt(A**2 + 4))
 
 gamma_vanilla = get_gamma_vanilla(S0, K, T, r, sigma)
 gamma_binary_put = get_gamma_binary(S0, K_put, T, r, sigma, type='put')
@@ -48,7 +48,7 @@ vanilla_vector = np.vectorize(get_gamma_vanilla)
 gamma_vector = np.vectorize(get_gamma_binary)
 
 strikes = [x for x in range(600, 3200, 20)]
-tau = T - 51/52
+tau = T
 # results = vanilla_vector(strikes, K, T, r, sigma)
 
 '''
@@ -65,8 +65,8 @@ results_call = gamma_vector(strikes, K, T, r, sigma, 'call')
 results_put = gamma_vector(strikes, K, T, r, sigma, 'put')
 
 
-model_call = gamma_vector([s for s in strikes], K_call, tau, r, sigma, 'call')
-model_put = gamma_vector([s for s in strikes], K_put, tau, r, sigma, 'put')
+model_call = gamma_vector( strikes, K_call, tau, r, sigma, 'call')
+model_put = gamma_vector(strikes, K_put, tau, r, sigma, 'put')
 
 sum_results = [results[i] + 640 * model_put[i] for i in range(44)] + [results[i] + 850 * results_call[i]
                                                                       for i in range(44, len(strikes))]
@@ -79,10 +79,20 @@ print(strikes[np.argmax(results_call)])
 print(strikes[np.argmin(results_call)])
 print(alpha_S)
 
+
+# Wykres gamma vanilla, binary call, binary put dla różnych tau i ustalonych K_call K_put
+strikes = [x for x in range(600, 3200, 20)]
+tau = T - 30/52
+results = vanilla_vector(strikes, K, tau, r, sigma)
+model_call = gamma_vector( strikes, K_call, tau, r, sigma, 'call')
+model_put = gamma_vector(strikes, K_put, tau, r, sigma, 'put')
+
 plt.plot(strikes, results, color='black')
-plt.plot(strikes, [100 * x for x in model_call], color='red')
-plt.plot(strikes, [100 * x for x in model_put], color='blue')
+plt.plot(strikes, [1000 * x for x in model_call], color='red')
+plt.plot(strikes, [1000 * x for x in model_put], color='blue')
 plt.axhline(0, color='green', linestyle="--")
+plt.axvline(1480, color='green', linestyle="--")
+plt.show()
 '''
 plt.plot(strikes, [alpha_S[i] * model_call[i] for i in range(len(strikes))], color='red')
 plt.plot(strikes, sum_results, color='green')
@@ -90,8 +100,8 @@ plt.axvline(K, color='green', linestyle="--")
 plt.axvline(K * np.exp(-r - A**2 - 0.5 * A * np.sqrt(A**2 + 4)), color='orange', linestyle="--")
 plt.axvline(K * np.exp(-r - A**2 + 0.5 * A * np.sqrt(A**2 + 4)), color='yellow', linestyle="--")
 plt.axhline(0, color='pink', linestyle="--")
-'''
 plt.show()
+'''
 
 #plt.plot(strikes, results_call)
 #plt.plot(strikes, results_put)
