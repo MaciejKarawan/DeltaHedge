@@ -83,8 +83,7 @@ def wallet_delta(paths, T_years, sigma, r, K, option_type='call', n_hedge=252):
 
     # Początkowy skład portfela
     stock_position[:, 0] = delta
-    cost = (np.abs(option_value[:, 0]) + np.abs(delta * S0)) * 0.004
-    cash_position[:, 0] = (option_value[:, 0] - delta * S0) - cost
+    cash_position[:, 0] = (option_value[:, 0] - delta * S0)
     portfolio_value[:, 0] = stock_position[:, 0] * S0 + cash_position[:, 0]
     portfolio_delta[:, 0] = -delta + stock_position[:, 0]
 
@@ -99,8 +98,7 @@ def wallet_delta(paths, T_years, sigma, r, K, option_type='call', n_hedge=252):
         # Sprawdzenie, czy jest to punkt rehedgingu
         if i in hedge_indices:
             stock_position[:, i] = new_delta
-            cost = np.abs((stock_position[:, i] - (stock_position[:, i - 1])) * S_current) * 0.004
-            cash_position[:, i] -= (stock_position[:, i] - (stock_position[:, i - 1])) * S_current + cost
+            cash_position[:, i] -= (stock_position[:, i] - (stock_position[:, i - 1])) * S_current
 
         else:
             stock_position[:, i] = stock_position[:, i - 1]
@@ -121,13 +119,14 @@ def wallet_delta(paths, T_years, sigma, r, K, option_type='call', n_hedge=252):
         'stock': stock_position,
         'cash': cash_position,
         'option_value': option_value,
-        'portfolio_value': portfolio_value
+        'portfolio_value': portfolio_value,
+        'portfolio_delta': portfolio_delta
     }
 
     return portfolio_value[:,-1], portfolio_composition
 
 
-def wallet_delta_2(paths, T_years, sigma, r, K, option_type='call', n_hedge=252):
+def wallet_delta_2(paths, T_years, sigma, r, K, option_type='call', n_hedge=252, delta_margin = 0.0001, rehedge_margin=0.8):
     """
     Zakładamy że w momencie zero zaczynamy trading. Wykonanie akcji odbywa się w ostatnim kroku.
     (ostatnim dniu, bądź na zamknięcie giełdy ostatniego dnia)
@@ -177,37 +176,46 @@ def wallet_delta_2(paths, T_years, sigma, r, K, option_type='call', n_hedge=252)
     option_value = np.zeros((N, steps))
     portfolio_value = np.zeros((N, steps))
     portfolio_delta = np.zeros((N, steps))
+    portfolio_gamma = np.zeros((N, steps))
+    cost = np.zeros((N, steps))
 
     # Inicjalizacja portfela
     S0 = paths[:, 0]
     t_to_maturity = T_years
     option_value[:, 0] = option_price(S0, K, t_to_maturity, r, sigma, option_type)
     delta = option_delta(S0, K, t_to_maturity, r, sigma, option_type)
+    vanilla_gamma = option_gamma(S0, K, t_to_maturity, r, sigma, option_type)
 
     # Początkowy skład portfela
     stock_position[:, 0] = delta
-    cost = (np.abs(option_value[:, 0]) + np.abs(delta * S0)) * 0.004
-    cash_position[:, 0] = (option_value[:, 0] - delta * S0) - cost
+    cost[:, 0] = (np.abs(option_value[:, 0]) + np.abs(delta * S0)) * 0.004
+    cash_position[:, 0] = (option_value[:, 0] - delta * S0) - cost[:, 0]
     portfolio_value[:, 0] = stock_position[:, 0] * S0 + cash_position[:, 0]
     portfolio_delta[:, 0] = -delta + stock_position[:, 0]
+    portfolio_gamma[:, 0] = -vanilla_gamma
 
-    margins = {'delta_margin': 0.01}
-
+    margins = {'delta_margin': delta_margin, 'rehedge_margin': rehedge_margin}
 
     for i in range(1, steps-1):
-
         S_current = paths[:, i]
         t_to_maturity = T_years - i*dt
         option_value[:, i] = option_price(S_current, K, t_to_maturity, r, sigma, option_type)
         cash_position[:, i] = cash_position[:, i - 1] * np.exp(r * dt)
         new_delta = option_delta(S_current, K, t_to_maturity, r, sigma, option_type)
+        vanilla_gamma = option_gamma(S_current, K, t_to_maturity, r, sigma, option_type)
 
-        fixed_delta = adjust_vanilla_delta(new_delta, margins['delta_margin'])  #
+        # Obcinanie rehedge
+        current_portfolio_delta = -new_delta + stock_position[:, i - 1]
+        do_rehedge = np.abs(current_portfolio_delta) > margins['rehedge_margin']
+
+        # Obcinanie ITM OTM
+        fixed_delta = adjust_vanilla_delta(new_delta, margins['delta_margin'])
+
 
         if i in hedge_indices:
-            stock_position[:, i] = fixed_delta
-            cost = np.abs((stock_position[:, i] - (stock_position[:, i - 1])) * S_current) * 0.004
-            cash_position[:, i] -= (stock_position[:, i] - (stock_position[:, i - 1])) * S_current + cost
+            stock_position[:, i] = np.where(do_rehedge, fixed_delta, stock_position[:, i-1])
+            cost[:, i] = np.abs((stock_position[:, i] - (stock_position[:, i - 1])) * S_current) * 0.004
+            cash_position[:, i] -= (stock_position[:, i] - (stock_position[:, i - 1])) * S_current + cost[:, i]
 
         else:
             stock_position[:, i] = stock_position[:, i - 1]
@@ -215,6 +223,7 @@ def wallet_delta_2(paths, T_years, sigma, r, K, option_type='call', n_hedge=252)
         portfolio_after = stock_position[:, i] * S_current + cash_position[:, i] # Wartość portfela po rebalansowaniu
         portfolio_value[:, i] = portfolio_after
         portfolio_delta[:, i] = -fixed_delta + stock_position[:, i]
+        portfolio_gamma[:, i] = -vanilla_gamma
 
     # Moment wykonania opcji T = T_years
     S_T = paths[:,-1]
@@ -223,13 +232,16 @@ def wallet_delta_2(paths, T_years, sigma, r, K, option_type='call', n_hedge=252)
     stock_position[:,-1] = stock_position[:,-2]
     portfolio_value[:, -1] = stock_position[:,-1] * S_T + cash_position[:,-1] - option_value[:,-1]
     portfolio_delta[:, -1] = 0
+    portfolio_gamma[:, -1] = 0
 
     portfolio_composition = {
         'stock': stock_position,
         'cash': cash_position,
         'option_value': option_value,
         'portfolio_value': portfolio_value,
-        'portfolio_delta': portfolio_delta
+        'portfolio_delta': portfolio_delta,
+        'portfolio_gamma': portfolio_gamma,
+        'cost': np.cumsum(cost, axis=1)
     }
 
     return portfolio_value[:, -1], portfolio_composition
@@ -238,10 +250,13 @@ def wallet_delta_2(paths, T_years, sigma, r, K, option_type='call', n_hedge=252)
 
 
 def wallet_delta_gamma(paths, T_years, sigma, r, K, K_binary, option_type='call',
-                       n_hedge=252, binary_option_type='binary_call'):
+                       n_hedge=252, binary_option_type='binary_call',
+                       delta_margin = 0.1, rehedge_margin = 1.5, binary_gamma_margin = 1e-3):
 
     N, steps = paths.shape
     dt = T_years / steps
+
+    C = 1
 
     if n_hedge > steps:
         raise ValueError('Paths should be longer')
@@ -258,6 +273,7 @@ def wallet_delta_gamma(paths, T_years, sigma, r, K, K_binary, option_type='call'
     portfolio_value = np.zeros((N, steps))
     portfolio_delta = np.zeros((N, steps))
     portfolio_gamma = np.zeros((N, steps))
+    cost = np.zeros((N, steps))
 
     S0 = paths[:, 0]
     t_to_maturity = T_years
@@ -273,12 +289,12 @@ def wallet_delta_gamma(paths, T_years, sigma, r, K, K_binary, option_type='call'
     binary_gamma =  option_gamma(S0, K_binary, t_to_maturity, r, sigma, binary_option_type)
 
     # Inicjalizacja pozycji
-    binary_position[:, 0] = vanilla_gamma / binary_gamma
+    binary_position[:, 0] = C * vanilla_gamma / binary_gamma
     stock_position[:, 0] = vanilla_delta - binary_position[:, 0] * binary_delta
 
-    cost = (np.abs(binary_position[:, 0] * binary_value[:, 0]) + np.abs(stock_position[:, 0] * S0)) * 0.004
+    cost[:, 0] = (np.abs(binary_position[:, 0] * binary_value[:, 0]) + np.abs(stock_position[:, 0] * S0)) * 0.004
 
-    cash_position[:, 0] = (option_value[:, 0] - binary_position[:, 0] * binary_value[:, 0] - stock_position[:, 0] * S0) - cost
+    cash_position[:, 0] = (option_value[:, 0] - binary_position[:, 0] * binary_value[:, 0] - stock_position[:, 0] * S0) - cost[:, 0]
 
     # Wartość całego portfela
     portfolio_value[:, 0] = (cash_position[:, 0] +
@@ -290,7 +306,7 @@ def wallet_delta_gamma(paths, T_years, sigma, r, K, K_binary, option_type='call'
     portfolio_delta[:, 0] = -vanilla_delta + stock_position[:, 0] + binary_position[:, 0] * binary_delta
     portfolio_gamma[:, 0] = -vanilla_gamma + binary_position[:, 0] * binary_gamma
 
-    margins = {'delta_margin': 0.001, 'binary_gamma_margin': 1e-3}
+    margins = {'delta_margin': delta_margin, 'binary_gamma_margin': binary_gamma_margin, 'rehedge_margin': rehedge_margin}
     for i in range(1, steps-1):
         S_current = paths[:, i]
         t_to_maturity = T_years - i * dt
@@ -308,8 +324,11 @@ def wallet_delta_gamma(paths, T_years, sigma, r, K, K_binary, option_type='call'
         fixed_binary_delta = adjust_binary_delta(binary_delta, fixed_vanilla_delta, margins['delta_margin']) #
         do_calculations = (fixed_vanilla_delta != 0) | (fixed_vanilla_delta != 1)
 
+        # Obcinanie rehedge
+        current_portfolio_delta = -vanilla_delta + stock_position[:, i-1] + binary_position[:, i-1] * binary_delta
+        do_rehedge = np.abs(current_portfolio_delta) > margins['rehedge_margin']
+
         if i in hedge_indices:
-            # Obsługa zer
             binary_gamma_safe = np.where(do_calculations,
                                    np.where(np.abs(binary_gamma) > margins['binary_gamma_margin'], binary_gamma, np.sign(binary_gamma) * margins['binary_gamma_margin']),
                                          1) # 1 jest arbitralne
@@ -319,19 +338,19 @@ def wallet_delta_gamma(paths, T_years, sigma, r, K, K_binary, option_type='call'
                 gamma_ratio = np.sign(vanilla_gamma * binary_gamma_safe) * np.exp(log_ratio)
 
 
-            new_delta_2 = gamma_ratio
-            new_delta_1 = fixed_vanilla_delta - new_delta_2 * fixed_binary_delta
+            new_delta_2 = np.where(do_rehedge, np.where(fixed_binary_delta == 0, 0, gamma_ratio * C), binary_position[:, i-1])
+            new_delta_1 = np.where(do_rehedge, fixed_vanilla_delta - new_delta_2 * fixed_binary_delta, stock_position[:, i-1])
 
             stock_position[:, i] = new_delta_1
             binary_position[:, i] = new_delta_2
 
-            cost = (np.abs((stock_position[:, i] - stock_position[:, i - 1]) * S_current) +
+            cost[:, i] = (np.abs((stock_position[:, i] - stock_position[:, i - 1]) * S_current) +
                 np.abs(binary_position[:, i] - binary_position[:, i - 1]) * binary_value[:, i]) * 0.004
 
             cash_delta = ((stock_position[:, i] - stock_position[:, i - 1]) * S_current +
                           (binary_position[:, i] - binary_position[:, i - 1]) * binary_value[:, i])
 
-            cash_position[:, i] -= cash_delta + cost
+            cash_position[:, i] -= cash_delta + cost[:, i]
 
         else:
             stock_position[:, i] = stock_position[:, i - 1]
@@ -369,15 +388,26 @@ def wallet_delta_gamma(paths, T_years, sigma, r, K, K_binary, option_type='call'
         'option_value': option_value,
         'portfolio_value': portfolio_value,
         'delta': portfolio_delta,
-        'gamma': portfolio_gamma
+        'gamma': portfolio_gamma,
+        'cost': np.cumsum(cost, axis=1)
     }
     return final_pnl, portfolio_composition
 
 
 def wallet_delta_gamma_2(paths, T_years, sigma, r, K, K_binaries, option_type='call',
-                       n_hedge=252):
+                       n_hedge=252, delta_margin = 0.1, rehedge_margin = 6, denom_margin = 1e-3):
     N, steps = paths.shape
     dt = T_years / steps
+    J = 1
+
+    if K_binaries == []:
+        A = sigma
+        C = r + 0.5 * sigma ** 2
+        phi = (1 + np.sqrt(5)) / 2
+        K_call = K * (2 - np.exp(-A * phi - C))
+        K_put = K * (2 - np.exp(A / phi - C))
+        K_binaries = [K_call, K_put]
+
 
     if n_hedge > steps:
         raise ValueError('Paths should be longer')
@@ -396,6 +426,7 @@ def wallet_delta_gamma_2(paths, T_years, sigma, r, K, K_binaries, option_type='c
     portfolio_value = np.zeros((N, steps))
     portfolio_delta = np.zeros((N, steps))
     portfolio_gamma = np.zeros((N, steps))
+    cost = np.zeros((N, steps))
 
     S0 = paths[:, 0]
     t_to_maturity = T_years
@@ -413,20 +444,20 @@ def wallet_delta_gamma_2(paths, T_years, sigma, r, K, K_binaries, option_type='c
 
     # Put
     binary_put_value[:, 0] = binary_option_price(S0, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
-    binary_put_delta = option_delta(S0, K_binaries[0], t_to_maturity, r, sigma, 'binary_put')
-    binary_put_gamma = option_gamma(S0, K_binaries[0], t_to_maturity, r, sigma, 'binary_put')
+    binary_put_delta = option_delta(S0, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
+    binary_put_gamma = option_gamma(S0, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
 
     # Inicjalizacja pozycji
-    binary_call_position[:, 0] = (vanilla_gamma + K/S0) / binary_call_gamma
+    binary_call_position[:, 0] = J * vanilla_gamma * S0 / (S0 * binary_call_gamma + K * binary_put_gamma)
     binary_put_position[:, 0] = (K / S0) * binary_call_position[:, 0]
-    stock_position[:, 0] = vanilla_delta - (vanilla_gamma / (binary_call_gamma - K/S0)) * (binary_call_delta + (K/S0) * binary_put_delta)
+    stock_position[:, 0] = vanilla_delta - binary_call_position[:, 0] * binary_call_delta - binary_put_position[:, 0] * binary_put_delta
 
-    cost = (np.abs(binary_call_position[:, 0] * binary_call_value[:, 0])
+    cost[:, 0] = (np.abs(binary_call_position[:, 0] * binary_call_value[:, 0])
             + np.abs(stock_position[:, 0] * S0) + np.abs(binary_put_position[:, 0] * binary_put_value[:, 0])) * 0.004
 
     cash_position[:, 0] = (option_value[:, 0] -
                            binary_call_position[:, 0] * binary_call_value[:, 0] -
-                           stock_position[:, 0] * S0 - binary_put_position[:, 0] * binary_put_value[:, 0]) - cost
+                           stock_position[:, 0] * S0 - binary_put_position[:, 0] * binary_put_value[:, 0]) - cost[:, 0]
 
     # Wartość całego portfela
     portfolio_value[:, 0] = (cash_position[:, 0] +
@@ -443,13 +474,14 @@ def wallet_delta_gamma_2(paths, T_years, sigma, r, K, K_binaries, option_type='c
     portfolio_gamma[:, 0] = (-vanilla_gamma + binary_call_position[:, 0] * binary_call_gamma
                              + binary_put_position[:, 0] * binary_put_gamma)
 
-    margins = {'delta_margin': 0.001, 'binary_gamma_margin': 1e-3}
+    margins = {'delta_margin': delta_margin, 'denom_margin': denom_margin, 'rehedge_margin': rehedge_margin}
+
     for i in range(1, steps - 1):
         S_current = paths[:, i]
         t_to_maturity = T_years - i * dt
         option_value[:, i] = option_price(S_current, K, t_to_maturity, r, sigma, option_type)
-        binary_call_value[:, i] = binary_option_price(S0, K_binaries[0], t_to_maturity, r, sigma, 'binary_call')
-        binary_put_value[:, i] = binary_option_price(S0, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
+        binary_call_value[:, i] = binary_option_price(S_current, K_binaries[0], t_to_maturity, r, sigma, 'binary_call')
+        binary_put_value[:, i] = binary_option_price(S_current, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
         cash_position[:, i] = cash_position[:, i - 1] * np.exp(r * dt)
 
         vanilla_delta = option_delta(S_current, K, t_to_maturity, r, sigma, option_type)
@@ -465,32 +497,41 @@ def wallet_delta_gamma_2(paths, T_years, sigma, r, K, K_binaries, option_type='c
         fixed_binary_put_delta = adjust_binary_delta(binary_put_delta, fixed_vanilla_delta, margins['delta_margin'])  #
         do_calculations = (fixed_vanilla_delta != 0) | (fixed_vanilla_delta != 1)
 
+        # Obcinanie rehedge
+        current_portfolio_delta = (-vanilla_delta + stock_position[:, i-1] +
+                                 binary_call_position[:, i-1] * binary_call_delta +
+                                 binary_put_position[:, i-1] * binary_put_delta)
+
+        do_rehedge = np.abs(current_portfolio_delta) > margins['rehedge_margin']
+
         if i in hedge_indices:
             # Obsługa zer
-            '''binary_gamma_safe = np.where(do_calculations,
-                                         np.where(np.abs(binary_gamma) > margins['binary_gamma_margin'], binary_gamma,
-                                                  np.sign(binary_gamma) * margins['binary_gamma_margin']),
+            denom = S_current * binary_call_gamma + K * binary_put_gamma
+            denom_safe = np.where(do_calculations,
+                                         np.where(np.abs(denom) > margins['denom_margin'], denom,
+                                                  np.sign(denom) * margins['denom_margin']),
                                          1)  # 1 jest arbitralne
 
             with np.errstate(divide='ignore', invalid='ignore'):
-                log_ratio = np.log(np.abs(vanilla_gamma)) - np.log(np.abs(binary_gamma_safe))
-                gamma_ratio = np.sign(vanilla_gamma * binary_gamma_safe) * np.exp(log_ratio)'''
+                log_ratio = np.log(np.abs(J * vanilla_gamma * S_current)) - np.log(np.abs(denom_safe))
+                ratio = np.sign(J * vanilla_gamma * S_current * denom_safe) * np.exp(log_ratio)
 
+            binary_call_position[:, i] = np.where(do_rehedge, ratio, binary_call_position[:, i-1])
 
-            binary_call_position[:, i] = (vanilla_gamma + K / S_current) / binary_call_gamma
-            binary_put_position[:, i] = (K / S_current) * binary_call_position[:, i]
-            stock_position[:, i] = (fixed_vanilla_delta - (vanilla_gamma / (binary_call_gamma - K / S_current)) *
-                                    (fixed_binary_call_delta + (K / S_current) * fixed_binary_put_delta))
+            binary_put_position[:, i] = np.where(do_rehedge, (K / S_current) * binary_call_position[:, i], binary_put_position[:, i-1])
 
-            cost = (np.abs(binary_call_position[:, i] * binary_call_value[:, i])
-                    + np.abs(stock_position[:, i] * S_current) + np.abs(
-                        binary_put_position[:, i] * binary_put_value[:, i])) * 0.004
+            stock_position[:, i] = np.where(do_rehedge, (fixed_vanilla_delta - binary_call_position[:, i] * fixed_binary_call_delta -
+                                    binary_put_position[:, i] * fixed_binary_put_delta), stock_position[:, i-1])
+
+            cost[:, i] = (np.abs((binary_call_position[:, i] - binary_call_position[:, i-1]) * binary_call_value[:, i])
+                    + np.abs((stock_position[:, i] - stock_position[:, i-1]) * S_current) +
+                    np.abs((binary_put_position[:, i] - binary_put_position[:, i-1]) * binary_put_value[:, i])) * 0.004
 
             cash_delta = ((stock_position[:, i] - stock_position[:, i - 1]) * S_current +
                           (binary_call_position[:, i] - binary_call_position[:, i - 1]) * binary_call_value[:, i] +
                           (binary_put_position[:, i] - binary_put_position[:, i - 1]) * binary_put_value[:, i])
 
-            cash_position[:, i] -= cash_delta + cost
+            cash_position[:, i] -= cash_delta + cost[:, i]
 
         else:
             stock_position[:, i] = stock_position[:, i - 1]
@@ -527,6 +568,265 @@ def wallet_delta_gamma_2(paths, T_years, sigma, r, K, K_binaries, option_type='c
                                  binary_put_position[:, -1] * binary_put_value[:, -1] -
                                  option_value[:, -1])
 
+    # Wynik na koniec okresu
+    final_pnl = portfolio_value[:, -1]
+
+    portfolio_composition = {
+        'stock': stock_position,
+        'binary_call': binary_call_position,
+        'binary_put': binary_put_position,
+        'cash': cash_position,
+        'option_value': option_value,
+        'portfolio_value': portfolio_value,
+        'delta': portfolio_delta,
+        'gamma': portfolio_gamma,
+        'cost': np.cumsum(cost, axis=1)
+    }
+
+    return final_pnl, portfolio_composition
+
+
+
+def wallet_delta_gamma_3(paths, T_years, sigma, r, K, option_type='call',
+                       n_hedge=252, delta_margin = 0.1, rehedge_margin = 5, denom_margin = 1e-3):
+    N, steps = paths.shape
+    dt = T_years / steps
+
+    def func_K(tau):
+        max = K * np.exp(- (r + 1.5 * sigma**2) * tau)
+        A = sigma * np.sqrt(tau)
+        K_call = max * np.exp(r * tau + A ** 2 + 0.5 * A * np.sqrt(A ** 2 + 4))
+        K_put = max * np.exp(r * tau + A ** 2 - 0.5 * A * np.sqrt(A ** 2 + 4))
+
+        return [K_call, K_put, max]
+
+    J = 1
+    K_binaries = func_K(1)
+
+    if n_hedge > steps:
+        raise ValueError('Paths should be longer')
+
+    hedge_frequency = steps / n_hedge
+    hedge_frequency = max(1, int(hedge_frequency))
+    hedge_indices = np.arange(0, steps, hedge_frequency)
+
+    stock_position = np.zeros((N, steps))
+    binary_call_position = np.zeros((N, steps))
+    binary_put_position = np.zeros((N, steps))
+    cash_position = np.zeros((N, steps))
+    option_value = np.zeros((N, steps))
+    binary_call_value = np.zeros((N, steps))
+    binary_put_value = np.zeros((N, steps))
+    portfolio_value = np.zeros((N, steps))
+    portfolio_delta = np.zeros((N, steps))
+    portfolio_gamma = np.zeros((N, steps))
+    total_cost = np.zeros((N, steps))
+
+    S0 = paths[:, 0]
+    t_to_maturity = T_years
+
+    # Wartość i greki oryginalnej opcji (którą hedgujemy)
+    option_value[:, 0] = option_price(S0, K, t_to_maturity, r, sigma, option_type)
+    vanilla_delta = option_delta(S0, K, t_to_maturity, r, sigma, option_type)
+    vanilla_gamma = option_gamma(S0, K, t_to_maturity, r, sigma, option_type)
+
+    # Wartość i greki opcji binarnych
+    # Call
+    binary_call_value[:, 0] = binary_option_price(S0, K_binaries[0], t_to_maturity, r, sigma, 'binary_call')
+    binary_call_delta = option_delta(S0, K_binaries[0], t_to_maturity, r, sigma, 'binary_call')
+    binary_call_gamma = option_gamma(S0, K_binaries[0], t_to_maturity, r, sigma, 'binary_call')
+
+    # Put
+    binary_put_value[:, 0] = binary_option_price(S0, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
+    binary_put_delta = option_delta(S0, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
+    binary_put_gamma = option_gamma(S0, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
+
+    # Inicjalizacja pozycji
+    binary_call_position[:, 0] = J * vanilla_gamma * S0 / (S0 * binary_call_gamma + K_binaries[2] * binary_put_gamma)
+    binary_put_position[:, 0] = (K_binaries[2] / S0) * binary_call_position[:, 0]
+    stock_position[:, 0] = vanilla_delta - binary_call_position[:, 0] * binary_call_delta - binary_put_position[:, 0] * binary_put_delta
+
+    cost = (np.abs(binary_call_position[:, 0] * binary_call_value[:, 0])
+            + np.abs(stock_position[:, 0] * S0) + np.abs(binary_put_position[:, 0] * binary_put_value[:, 0])) * 0.004
+
+    total_cost[:, 0] = cost
+
+    cash_position[:, 0] = (option_value[:, 0] -
+                           binary_call_position[:, 0] * binary_call_value[:, 0] -
+                           stock_position[:, 0] * S0 - binary_put_position[:, 0] * binary_put_value[:, 0]) - cost
+
+    # Wartość całego portfela
+    portfolio_value[:, 0] = (cash_position[:, 0] +
+                             stock_position[:, 0] * S0 +
+                             binary_call_position[:, 0] * binary_call_value[:, 0] +
+                             binary_put_position[:, 0] * binary_put_value[:, 0])
+
+    # Delta i gamma całego portfela w momencie t=0
+    portfolio_delta[:, 0] = (-vanilla_delta + stock_position[:, 0] +
+                             binary_call_position[:, 0] * binary_call_delta +
+                             binary_put_position[:, 0] * binary_put_delta)
+
+    portfolio_gamma[:, 0] = (-vanilla_gamma + binary_call_position[:, 0] * binary_call_gamma
+                             + binary_put_position[:, 0] * binary_put_gamma)
+
+    margins = {'delta_margin': delta_margin, 'denom_margin': denom_margin, 'rehedge_margin': rehedge_margin}
+    restock = np.arange(0, steps, hedge_frequency * 130)
+
+    for i in range(1, steps - 1):
+        S_current = paths[:, i]
+        t_to_maturity = T_years - i * dt
+        option_value[:, i] = option_price(S_current, K, t_to_maturity, r, sigma, option_type)
+
+        binary_call_value[:, i] = binary_option_price(S_current, K_binaries[0], t_to_maturity, r, sigma, 'binary_call')
+        binary_put_value[:, i] = binary_option_price(S_current, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
+        cash_position[:, i] = cash_position[:, i - 1] * np.exp(r * dt)
+
+        vanilla_delta = option_delta(S_current, K, t_to_maturity, r, sigma, option_type)
+        vanilla_gamma = option_gamma(S_current, K, t_to_maturity, r, sigma, option_type)
+        binary_call_delta = option_delta(S_current, K_binaries[0], t_to_maturity, r, sigma, 'binary_call')
+        binary_call_gamma = option_gamma(S_current, K_binaries[0], t_to_maturity, r, sigma, 'binary_call')
+        binary_put_delta = option_delta(S_current, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
+        binary_put_gamma = option_gamma(S_current, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
+
+        # Obcinanie przypadków ITM i OTM
+        fixed_vanilla_delta = adjust_vanilla_delta(vanilla_delta, margins['delta_margin'])  #
+        fixed_binary_call_delta = adjust_binary_delta(binary_call_delta, fixed_vanilla_delta, margins['delta_margin'])  #
+        fixed_binary_put_delta = adjust_binary_delta(binary_put_delta, fixed_vanilla_delta, margins['delta_margin'])  #
+        do_calculations = (fixed_vanilla_delta != 0) | (fixed_vanilla_delta != 1)
+
+        # Obcinanie rehedge
+        current_portfolio_delta = (-vanilla_delta + stock_position[:, i - 1] +
+                                   binary_call_position[:, i - 1] * binary_call_delta +
+                                   binary_put_position[:, i - 1] * binary_put_delta)
+
+        do_rehedge = np.abs(current_portfolio_delta) > margins['rehedge_margin']
+
+        if i in hedge_indices:
+            if i in restock:
+                cost2 = (np.abs(binary_call_position[:, i-1] * binary_call_value[:, i]) +
+                         np.abs(binary_put_position[:, i-1] * binary_put_value[:, i])) * 0.004
+
+                total_cost[:, i] = cost2
+
+                cash_position[:, i] += (binary_call_position[:, i-1] * binary_call_value[:, i] +
+                                        binary_put_position[:, i-1] * binary_put_value[:, i]) - cost2
+
+                K_binaries = func_K(t_to_maturity)
+
+                binary_call_value[:, i] = binary_option_price(S_current, K_binaries[0], t_to_maturity, r, sigma,
+                                                              'binary_call')
+                binary_put_value[:, i] = binary_option_price(S_current, K_binaries[1], t_to_maturity, r, sigma,
+                                                             'binary_put')
+
+                binary_call_delta = option_delta(S_current, K_binaries[0], t_to_maturity, r, sigma, 'binary_call')
+                binary_call_gamma = option_gamma(S_current, K_binaries[0], t_to_maturity, r, sigma, 'binary_call')
+                binary_put_delta = option_delta(S_current, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
+                binary_put_gamma = option_gamma(S_current, K_binaries[1], t_to_maturity, r, sigma, 'binary_put')
+
+                fixed_binary_call_delta = adjust_binary_delta(binary_call_delta, fixed_vanilla_delta,
+                                                              margins['delta_margin'])  #
+                fixed_binary_put_delta = adjust_binary_delta(binary_put_delta, fixed_vanilla_delta,
+                                                             margins['delta_margin'])  #
+
+                # Obsługa zer
+                denom = S_current * binary_call_gamma + K_binaries[2] * binary_put_gamma
+                denom_safe = np.where(do_calculations,
+                                      np.where(np.abs(denom) > margins['denom_margin'], denom,
+                                               np.sign(denom) * margins['denom_margin']),
+                                      1)  # 1 jest arbitralne
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    log_ratio = np.log(np.abs(J * vanilla_gamma * S_current)) - np.log(np.abs(denom_safe))
+                    ratio = np.sign(J * vanilla_gamma * S_current * denom_safe) * np.exp(log_ratio)
+
+                binary_call_position[:, i] = np.where(do_rehedge, ratio, binary_call_position[:, i-1])
+                binary_put_position[:, i] = np.where(do_rehedge,
+                                                     (K_binaries[2] / S_current) * binary_call_position[:, i],
+                                                     binary_put_position[:, i-1])
+
+                stock_position[:, i] = np.where(do_rehedge, (fixed_vanilla_delta - binary_call_position[:, i] * fixed_binary_call_delta -
+                                        binary_put_position[:, i] * fixed_binary_put_delta),
+                                                stock_position[:, i-1])
+
+                cost = (np.abs((binary_call_position[:, i]) * binary_call_value[:, i])
+                        + np.abs((stock_position[:, i] - stock_position[:, i-1]) * S_current) +
+                        np.abs((binary_put_position[:, i]) * binary_put_value[:, i])) * 0.004
+
+                total_cost[:, i] += cost
+
+                cash_delta = ((stock_position[:, i] - stock_position[:, i - 1]) * S_current +
+                              (binary_call_position[:, i]) * binary_call_value[:, i] +
+                              (binary_put_position[:, i]) * binary_put_value[:, i])
+
+                cash_position[:, i] -= cash_delta + cost
+
+            else:
+                # Obsługa zer
+                denom = S_current * binary_call_gamma + K_binaries[2] * binary_put_gamma
+                denom_safe = np.where(do_calculations,
+                                      np.where(np.abs(denom) > margins['denom_margin'], denom,
+                                               np.sign(denom) * margins['denom_margin']),
+                                      1)  # 1 jest arbitralne
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    log_ratio = np.log(np.abs(J * vanilla_gamma * S_current)) - np.log(np.abs(denom_safe))
+                    ratio = np.sign(J * vanilla_gamma * S_current * denom_safe) * np.exp(log_ratio)
+
+                binary_call_position[:, i] = np.where(do_rehedge, ratio, binary_call_position[:, i - 1])
+                binary_put_position[:, i] = np.where(do_rehedge,
+                                                     (K_binaries[2] / S_current) * binary_call_position[:, i],
+                                                     binary_put_position[:, i - 1])
+
+                stock_position[:, i] = np.where(do_rehedge, (
+                            fixed_vanilla_delta - binary_call_position[:, i] * fixed_binary_call_delta -
+                            binary_put_position[:, i] * fixed_binary_put_delta),
+                                                stock_position[:, i - 1])
+
+                cost = (np.abs((binary_call_position[:, i] - binary_call_position[:, i-1]) * binary_call_value[:, i])
+                        + np.abs((stock_position[:, i] - stock_position[:, i - 1]) * S_current) +
+                        np.abs((binary_put_position[:, i] - binary_put_position[:, i]) * binary_put_value[:, i])) * 0.004
+
+                total_cost[:, i] = cost
+
+                cash_delta = ((stock_position[:, i] - stock_position[:, i - 1]) * S_current +
+                              (binary_call_position[:, i] - binary_call_position[:, i-1]) * binary_call_value[:, i] +
+                              (binary_put_position[:, i] - binary_put_position[:, i-1]) * binary_put_value[:, i])
+
+                cash_position[:, i] -= cash_delta + cost
+
+        else:
+            stock_position[:, i] = stock_position[:, i - 1]
+            binary_call_position[:, i] = binary_call_position[:, i - 1]
+            binary_put_position[:, i] = binary_put_position[:, i - 1]
+
+
+        portfolio_value[:, i] = (cash_position[:, i] +
+                                 stock_position[:, i] * S_current +
+                                 binary_call_position[:, i] * binary_call_value[:, i] +
+                                 binary_put_position[:, i] * binary_put_value[:, i])
+
+        # Delta i gamma całego portfela w momencie t=0
+        portfolio_delta[:, i] = (-vanilla_delta + stock_position[:, i] +
+                                 binary_call_position[:, i] * fixed_binary_call_delta +
+                                 binary_put_position[:, i] * fixed_binary_put_delta)
+
+        portfolio_gamma[:, i] = (-vanilla_gamma + binary_call_position[:, i] * binary_call_gamma
+                                 + binary_put_position[:, i] * binary_put_gamma)
+
+    # Moment wykonania opcji T = T_years
+    S_T = paths[:, -1]
+    stock_position[:, -1] = stock_position[:, -2]
+    binary_call_position[:, -1] = binary_call_position[:, -2]
+    binary_put_position[:, -1] = binary_put_position[:, -2]
+    cash_position[:, -1] = cash_position[:, -2] * np.exp(r * dt)
+    option_value[:, -1] = option_price(S_T, K, 0, r, sigma, option_type)
+    binary_call_value[:, -1] = binary_option_price(S_T, K_binaries[0], 0, r, sigma, 'binary_call')
+    binary_put_value[:, -1] = binary_option_price(S_T, K_binaries[1], 0, r, sigma, 'binary_put')
+    portfolio_value[:, -1] = (cash_position[:, -1] +
+                                 stock_position[:, -1] * S_T +
+                                 binary_call_position[:, -1] * binary_call_value[:, -1] +
+                                 binary_put_position[:, -1] * binary_put_value[:, -1]) - option_value[:, -1]
+
     portfolio_delta[:, -1] = 0
     portfolio_gamma[:, -1] = 0
 
@@ -541,7 +841,8 @@ def wallet_delta_gamma_2(paths, T_years, sigma, r, K, K_binaries, option_type='c
         'option_value': option_value,
         'portfolio_value': portfolio_value,
         'delta': portfolio_delta,
-        'gamma': portfolio_gamma
+        'gamma': portfolio_gamma,
+        'cost': np.cumsum(total_cost, axis=1)
     }
 
     return final_pnl, portfolio_composition
